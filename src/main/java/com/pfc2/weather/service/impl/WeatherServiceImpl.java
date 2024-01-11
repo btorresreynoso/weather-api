@@ -7,11 +7,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import javax.naming.ServiceUnavailableException;
+
+import org.apache.coyote.BadRequestException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -38,7 +45,8 @@ public class WeatherServiceImpl implements IWeatherService {
 	private WeatherRepository weatherRepository;
 
 	@Override
-	public WeatherPostResponseDTO getWeatherInfo(double lat, double lon) throws JsonMappingException, JsonProcessingException {
+	@Transactional(propagation = Propagation.REQUIRED, rollbackFor = {Exception.class})
+	public WeatherPostResponseDTO getWeatherInfo(double lat, double lon) throws JsonMappingException, JsonProcessingException, BadRequestException, ServiceUnavailableException {
 		WeatherPostResponseDTO weather = null;
 		boolean consultarApi = true;
 		// Consulta registro
@@ -67,26 +75,40 @@ public class WeatherServiceImpl implements IWeatherService {
             RestTemplate restTemplate = new RestTemplate(requestFactory);
             // Prepara URL
             String urlWithParams = apiUrl + "?lat={lat}&lon={lon}&appid={appid}";
-            // Realiza el Request
-            ResponseEntity<String> response = restTemplate.getForEntity(urlWithParams, String.class, queryParams);
-            // Valida Response
-            if (response.getStatusCode().is2xxSuccessful()) {
-            	String responseBody = response.getBody();
-            	ObjectMapper objectMapper = new ObjectMapper();
-            	JsonNode root = objectMapper.readTree(responseBody);
-            	// Prepara un nuevo objeto
-            	WeatherHistory weatherHistoryNew = new WeatherHistory();
-            	weatherHistoryNew.setCoord(new WeatherHistoryId(lat, lon));
-            	weatherHistoryNew.setWeather(root.path("weather").get(0).path("main").asText());
-            	weatherHistoryNew.setTempMax(root.path("main").path("temp_max").asDouble());
-            	weatherHistoryNew.setTempMin(root.path("main").path("temp_min").asDouble());
-            	weatherHistoryNew.setHumity(root.path("main").path("humidity").asInt());
-            	weatherHistoryNew.setCreated(LocalDateTime.now());
-            	// Persiste el objeto
-            	weatherRepository.save(weatherHistoryNew);
-            	// Convierte a DTO
-            	weather = ConverterDTO.convertWeatherHistoryToWeatherPostResponseDTO(weatherHistoryNew);
-            }
+            try {
+            	// Realiza el Request
+                ResponseEntity<String> response = restTemplate.getForEntity(urlWithParams, String.class, queryParams);
+                // Valida Response
+                if (response.getStatusCode().is2xxSuccessful()) {
+                	String responseBody = response.getBody();
+                	ObjectMapper objectMapper = new ObjectMapper();
+                	JsonNode root = objectMapper.readTree(responseBody);
+                	// Prepara un nuevo objeto
+                	WeatherHistory weatherHistoryNew = new WeatherHistory();
+                	weatherHistoryNew.setCoord(new WeatherHistoryId(lat, lon));
+                	weatherHistoryNew.setWeather(root.path("weather").get(0).path("main").asText());
+                	weatherHistoryNew.setTempMax(root.path("main").path("temp_max").asDouble());
+                	weatherHistoryNew.setTempMin(root.path("main").path("temp_min").asDouble());
+                	weatherHistoryNew.setHumity(root.path("main").path("humidity").asInt());
+                	weatherHistoryNew.setCreated(LocalDateTime.now());
+                	// Persiste el objeto
+                	weatherRepository.save(weatherHistoryNew);
+                	// Convierte a DTO
+                	weather = ConverterDTO.convertWeatherHistoryToWeatherPostResponseDTO(weatherHistoryNew);
+                }
+			} catch (HttpClientErrorException e) {
+					if (e.getStatusCode().equals(HttpStatus.BAD_REQUEST) || e.getStatusCode().equals(HttpStatus.NOT_FOUND)) {
+						String responseBody = e.getResponseBodyAsString();
+	                	ObjectMapper objectMapper = new ObjectMapper();
+	                	JsonNode root = objectMapper.readTree(responseBody);
+	                	throw new HttpClientErrorException(e.getStatusCode(), root.path("message").asText());
+					} else {
+						throw new ServiceUnavailableException(e.getMessage());
+					}
+					
+			} catch (Exception e) {
+				throw new ServiceUnavailableException(e.getMessage());
+			}
 		}
 		return weather;
 	}
